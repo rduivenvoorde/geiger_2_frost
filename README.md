@@ -39,6 +39,8 @@ Configuration via the Wifi configuration page:
 - fill in all info on that page (example below)
 - save and check
 
+![WifiManager custom params](./img/config.png)
+
 ## Frost configs
 
 You need the following:
