@@ -2,6 +2,15 @@
 
 Sent CPM counts fo a Frost server from cpm-tube board connected to Wemos D1 mini
 
+Counting code based on Revspace version: https://github.com/revspace/geiger (creds for Revspace coders)
+
+There is A LOT of information in the code comments, please check there.
+
+TIPS:
+
+- to flash to ESP8266, make sure you flash with "Tools/Flash Size/4M (1M SPIFFS)" as we use the FS/filesystem
+- to 'silence' the board: just remove the little J1 jumper next to the buzzer
+
 ## Features
 
 - using WifiManager to configure wifi params
@@ -50,6 +59,6 @@ You need the following:
 - 'mqtt topic' to send the Frost message to: eg: 'v1.0/Datastreams(0)/Observations'
 
 To check: use mosquitto_sub to subscribe to messages:
-
-   mosquitto_sub -v -h zuidt.nl -p 1884 -t "v1.0/#"
-
+```
+mosquitto_sub -v -h zuidt.nl -p 1884 -t "v1.0/#"
+```
