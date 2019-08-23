@@ -99,6 +99,7 @@ static unsigned long int second_prev = 0;
 ICACHE_RAM_ATTR static void tube_impulse(void)
 {
   counts++;
+  Serial.print(".");
   //check to inspect the circular buffer
   //Serial.println(counts);
   //int c = 0;
@@ -277,7 +278,14 @@ static bool mqtt_send(const char *topic, const char *value, bool retained)
         DynamicJsonDocument doc(capacity);
         doc["result"] = value;
         doc["resultTime"] = UTC.dateTime(W3C).c_str(); // "2019-08-07T12:39:12.209Z"
-                
+        /* TODO
+        if ( (doc["resultTime"].length()) < 20){
+          Serial.print("Time string length < 20 (probably not valid): ");         
+          Serial.println(doc["resultTime"]);
+          result = false;
+          return result;
+        }*/
+                        
         char buffer[512];
         size_t n = serializeJson(doc, buffer);
         Serial.println("Publishing:");
@@ -358,7 +366,7 @@ void loop() {
         Serial.print(second_prev);
         Serial.print("=");
         Serial.println(second - second_prev);*/
-
+        Serial.println("");
         // calculate sum
         int cpm = 0;
         for (int i = 0; i < 60; i++) {
@@ -369,7 +377,12 @@ void loop() {
         // to prevent sending a zero, AND to let the tube warm up a little
         // only sent the first cmp count AFTER the SECOND log period
         // that is when second_prev > 0
-        if (second_prev > 0){        
+        // also check for values < 10 (restarting etc etc)
+        if (cpm < 10){
+          Serial.print("Value < 10 (probably not valid): ");         
+          Serial.println(cpm);
+        }
+        else if (second_prev > 0){        
           char message[16];
           //snprintf(message, sizeof(message), "%d cpm", cpm);
           snprintf(message, sizeof(message), "%d", cpm);
