@@ -8,7 +8,9 @@
  * - bigger circular buffer  (like 2 or 3 minutes)?
  * - sent also to radmon (https://radmon.org/index.php/forum/pyradmon/937-pyradmon-reborn-v2-0-0)
  *   curl -v "https://radmon.org/radmon.php?user=your_user&password=your_password&function=submit&datetime=2019-08-20%2021:57:34&value=18&unit=CPM"
- * - 
+ * - think about resultTime vs phenomenonTime...
+ * - check if we can sent results as numbers (instead of strings) in json
+ * 
  */
 
 // FS = File System to be able to save config
@@ -21,26 +23,60 @@
 #include <FS.h>                   // https://arduino-esp8266.readthedocs.io/en/latest/filesystem.html
                                   // https://github.com/pellepl/spiffs/
 
+
 //needed to create json for config save AND frost messages
 #include <ArduinoJson.h>          //https://github.com/bblanchon/ArduinoJson
 
+
 // https://arduino-esp8266.readthedocs.io/
 #include <ESP8266WiFi.h>          // https://github.com/esp8266/Arduino
+
 
 //needed for WifiManager library  // https://github.com/tzapu/WiFiManager
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
 
+
 // For MQTT pub/sub messaging
+// NOTE IMPORTANT
+// we are sending pretty long json messages, see note https://github.com/knolleary/pubsubclient
+// you need to enlarge MQTT_MAX_PACKET_SIZE (default 128) in PubSubClient.h to 512 or so
+// ELSE ALL GPS MESSAGES WILL FAIL
+/*
+  #ifndef MQTT_MAX_PACKET_SIZE
+  #define MQTT_MAX_PACKET_SIZE 512
+  #endif
+*/
+
 #include <PubSubClient.h>         // https://github.com/knolleary/pubsubclient
+
+
+// For ublox/gps connection
+#include <NMEAGPS.h>              // https://github.com/SlashDevin/NeoGPS
+#include <GPSport.h>
+// LET OP!!!!
+// wemos/eps heeft voor zover ik werkend krijg maar 1 Serial poort: Serial
+// Onderstaande is nodig, met RT->RX en RX->RT connected (en 3V en G)
+#define gpsPort Serial
+#define GPS_PORT_NAME "Serial"
+#define Serial Serial
+
+NMEAGPS  gps; // This parses the GPS characters
+gps_fix  fix; // This holds on to the latest values
+
+int sats = -999;
+float lat = -999;
+float lon = -999;
 
 //for LED status                  // From core, to blink led
 #include <Ticker.h>
 Ticker ticker;
 
+
 //To be able to use networktime for timestamps
 #include <ezTime.h>                // https://github.com/ropg/ezTime
+
 
 // define your default values here
 // if there are different values in the saved config.json, they are overwritten.
@@ -271,13 +307,6 @@ static bool mqtt_send(const char *topic, const char *value, bool retained)
     }
     if (mqttClient.connected()) {
 
-        // {"result": 24.57, "resultTime":"2019-08-07T12:39:12.209Z"}
-        // https://arduinojson.org/v6/assistant/ size on ESP32/ESP8266 32+43 = 75
-        // see https://arduinojson.org/v6/example/generator/
-        const size_t capacity = JSON_OBJECT_SIZE(2);
-        DynamicJsonDocument doc(capacity);
-        doc["result"] = value;
-        doc["resultTime"] = UTC.dateTime(W3C).c_str(); // "2019-08-07T12:39:12.209Z"
         /* TODO
         if ( (doc["resultTime"].length()) < 20){
           Serial.print("Time string length < 20 (probably not valid): ");         
@@ -285,7 +314,38 @@ static bool mqtt_send(const char *topic, const char *value, bool retained)
           result = false;
           return result;
         }*/
-                        
+        DynamicJsonDocument doc(1024);
+        doc["result"] = String(value).toInt(); // mmm is this ok to go from char* to int ??;
+        doc["resultTime"] = UTC.dateTime(W3C).c_str(); // "2019-08-07T12:39:12.209Z"    
+        
+        if (sats == -999)
+        {
+          // Mmm no location or GPS ...
+          
+          // {"result": 24.57, "resultTime":"2019-08-07T12:39:12.209Z"}
+          // https://arduinojson.org/v6/assistant/ size on ESP32/ESP8266 32+43 = 75
+          // see https://arduinojson.org/v6/example/generator/
+          //const size_t capacity = JSON_OBJECT_SIZE(2);
+          //DynamicJsonDocument doc(capacity);
+          //doc["result"] = value;
+          //doc["resultTime"] = UTC.dateTime(W3C).c_str(); // "2019-08-07T12:39:12.209Z"                       
+        }
+        else{
+          // YES we have a valid location from GPS
+          // {"resultTime":"2019-02-01T19:09:00.000Z","result" : 20,"FeatureOfInterest":{"name":"GPSlokatie","description":"sats:7,time:19:08:00","encodingType":"application/vnd.geo+json","feature":{"type":"Point","coordinates":[4.648184,52.397121]}}}
+          JsonObject FeatureOfInterest = doc.createNestedObject("FeatureOfInterest");
+          FeatureOfInterest["name"] = "GPS";
+          FeatureOfInterest["description"] = "GPS";
+          JsonObject FeatureOfInterest_properties = FeatureOfInterest.createNestedObject("properties");
+          FeatureOfInterest_properties["sats"] = sats;
+          FeatureOfInterest["encodingType"] = "application/vnd.geo+json";
+          JsonObject FeatureOfInterest_feature = FeatureOfInterest.createNestedObject("feature");
+          FeatureOfInterest_feature["type"] = "Point";
+          JsonArray FeatureOfInterest_feature_coordinates = FeatureOfInterest_feature.createNestedArray("coordinates");
+          FeatureOfInterest_feature_coordinates.add(lon);
+          FeatureOfInterest_feature_coordinates.add(lat);
+        }
+        
         char buffer[512];
         size_t n = serializeJson(doc, buffer);
         Serial.println("Publishing:");
@@ -311,7 +371,7 @@ static bool mqtt_send(const char *topic, const char *value, bool retained)
 // ONE TIME SETUP
 void setup() {
   
-  Serial.begin(115200);
+  Serial.begin(9600);
   Serial.println("\n******\nGEIGER\n******");
 
   //set led pin as output
@@ -338,12 +398,49 @@ void setup() {
     write_fs_config();
   //}
 
+  Serial.println('Starting Serial connection for GPS...');
+  while (!Serial){
+    Serial.println('Waiting for Serial connection...');
+  }
+  gpsPort.begin(9600);  
+
   // start counting
   memset(secondcounts, 0, sizeof(secondcounts));
   Serial.println("Start counting ...");
   pinMode(PIN_TICK, INPUT);
   attachInterrupt(digitalPinToInterrupt(PIN_TICK), tube_impulse, FALLING);
 }
+
+static void GPSloop();
+static void GPSloop()
+{
+  while (gps.available( gpsPort ))
+  {
+    fix = gps.read();
+    if (fix.valid.location)
+    {
+      sats = fix.satellites;
+      lat = fix.latitude();
+      lon = fix.longitude();
+    }
+    // TODO: hit every second... async? interrupt?
+    //Serial.print("o");
+    /*
+    Serial.print( F("Sats: ") );
+    Serial.print( fix.satellites );
+    Serial.print( ", " );
+    
+    Serial.print( F("Location: ") );
+    if (fix.valid.location) {
+      Serial.print( fix.latitude(), 6 );
+      Serial.print( ", " );
+      Serial.print( fix.longitude(), 6 );
+    }
+    Serial.println("");
+    */
+  }
+
+} // GPSloop
 
 // MAIN LOOP
 void loop() {
@@ -373,6 +470,13 @@ void loop() {
             cpm += secondcounts[i];
         }
 
+        Serial.print("Sats: ");
+        Serial.print(sats);
+        Serial.print(" Lat: ");
+        Serial.print(lat, 6);
+        Serial.print(" Lon: ");
+        Serial.println(lon, 6);
+
         // send over MQTT
         // to prevent sending a zero, AND to let the tube warm up a little
         // only sent the first cmp count AFTER the SECOND log period
@@ -384,11 +488,14 @@ void loop() {
         }
         else if (second_prev > 0){        
           char message[16];
+          
           //snprintf(message, sizeof(message), "%d cpm", cpm);
           snprintf(message, sizeof(message), "%d", cpm);
+         
           if (!mqtt_send(mqtt_topic, message, true)) {
-              Serial.println("Restarting ESP...");
-              ESP.restart();
+              //Serial.println("Restarting ESP...");
+              //ESP.restart();
+              Serial.println("PROBLEM sending count via MQTT !!!");
           }
         }
         else{
@@ -397,8 +504,12 @@ void loop() {
           Serial.println("But skip for sending, because this is the first (cold/maybe zero) one...");
         }
 
-        second_prev = second;
+        second_prev = second;  // TODO? move this up (to be sure it is rest before the maybe time costing ip stuff?)
     }
+    
     // keep MQTT alive
     mqttClient.loop();
+    // keep GPS reading
+    GPSloop();
+    
 }
