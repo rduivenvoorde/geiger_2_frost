@@ -10,6 +10,7 @@
  *   curl -v "https://radmon.org/radmon.php?user=your_user&password=your_password&function=submit&datetime=2019-08-20%2021:57:34&value=18&unit=CPM"
  * - think about resultTime vs phenomenonTime...
  * - check if we can sent results as numbers (instead of strings) in json
+ * - instead of sending an value every minute, also make it possible (if driving) to sent every x meter
  * 
  */
 
@@ -36,6 +37,8 @@
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h>
+
+#define WIFI_SSD "Geiger 192.168.4.1"
 
 
 // For MQTT pub/sub messaging
@@ -69,6 +72,36 @@ int sats = -999;
 float lat = -999;
 float lon = -999;
 
+
+#include <Adafruit_SSD1306.h>          // https://github.com/adafruit/Adafruit_SSD1306
+// Screen setup:
+// https://www.instructables.com/id/Wemos-D1-Mini-096-SSD1306-OLED-Display-Using-SPI/
+//  Wemos  -> screen
+//  G      -> GND
+//  3.3V   -> VCC
+//  D5     -> D0
+//  D7     -> D1
+//  D3     -> RES
+//  D1     -> DC
+//  D4     -> CS
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+// If using software SPI (the default case):
+#define OLED_MOSI   D7
+#define OLED_CLK   D5
+#define OLED_DC    D1
+#define OLED_CS    D4
+#define OLED_RESET D3
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
+
+String l1 = "";  // txtsize 2 = 10 chars
+String l2 = "";  // txtsize 1 = 21 chars
+String l3 = "";
+String l4 = "";
+String l5 = "";
+//String DOTS = ".....................";
+
 //for LED status                  // From core, to blink led
 #include <Ticker.h>
 Ticker ticker;
@@ -76,6 +109,7 @@ Ticker ticker;
 
 //To be able to use networktime for timestamps
 #include <ezTime.h>                // https://github.com/ropg/ezTime
+Timezone nl_timezone;
 
 
 // define your default values here
@@ -124,7 +158,7 @@ ICACHE_RAM_ATTR static void reset_settings(void){
 }
 
 // the total count value
-static volatile unsigned long counts = 0;
+static volatile unsigned long total_count = 0;
 // working variables
 static int secondcounts[60];
 static unsigned long int secidx_prev = 0;
@@ -134,10 +168,10 @@ static unsigned long int second_prev = 0;
 // interrupt routine for geiger counter
 ICACHE_RAM_ATTR static void tube_impulse(void)
 {
-  counts++;
+  total_count++;
   Serial.print(".");
   //check to inspect the circular buffer
-  //Serial.println(counts);
+  //Serial.println(total_count);
   //int c = 0;
   //for(int i = 0; i < 60; i++)
   //{
@@ -251,18 +285,27 @@ void setup_wifi(){
   wifiManager.addParameter(&custom_mqtt_port);
   wifiManager.addParameter(&custom_mqtt_topic);
 
+  l2 = "Connect to wifi ssd:";
+  l3 = " "+String(WIFI_SSD);
+  l4 = "Browse to 192.168.4.1";
+  to_display(5, "Set parameters there");
+
   //fetches ssid and pass and tries to connect
   //if it does not connect it starts an access point with the specified name
   //and goes into a blocking loop awaiting configuration
-  if (!wifiManager.autoConnect("GEIGER-CONFIG-ME-192-168-4-1")) {
+  if (!wifiManager.autoConnect(WIFI_SSD)) {
     Serial.println("failed to connect and hit timeout");
     //reset and try again, or maybe put it to deep sleep
-    ESP.reset();
+    //ESP.reset();
     delay(1000);
   }
 
   //if you get here you have connected to the WiFi
   Serial.println("Connected to wifi... :-) ");
+  l2 = "";
+  l2 = "Connected to wifi !!";
+  l4 = "";
+  l4 = "";
 
   // Trying to setup eztime / networktime
   if (waitForSync(10)){
@@ -271,7 +314,8 @@ void setup_wifi(){
   else{
     // TODO: should we bail out here, else wrong datetimes to frost/servers ??
     Serial.println("UTC... Time not yet available (but we should not come here as we ARE connected???) ...");
-  }  
+  }
+  nl_timezone.setLocation(F("Europe/Amsterdam"));
 
   // TODO: only set save_config to true when we went through the access point step?
   save_config = true;
@@ -349,17 +393,24 @@ static bool mqtt_send(const char *topic, const char *value, bool retained)
         char buffer[512];
         size_t n = serializeJson(doc, buffer);
         Serial.println("Publishing:");
-        //Serial.print(value);
+        //Serial.print(value
         serializeJsonPretty(doc, Serial);
         Serial.println();        
         Serial.print("to ");
         Serial.print(topic);
         Serial.print(" ... ");
-        result = mqttClient.publish(topic, buffer, retained);
-        Serial.println(result ? "OK" : "FAIL");
+        result = mqttClient.publish(topic, buffer, retained);     
+        
         if (result){
-          // NO RESULT: LED stays ON == NO mqtt connection
+          to_display(4, "MQTT: OK sent: " + String(value));
+          Serial.println("OK");
           digitalWrite(BUILTIN_LED, HIGH); // OFF     
+        }
+        else{
+          Serial.println("FAIL");
+          l3 = "";
+          to_display(4, ("MQTT: FAIL to sent...") );
+          // NO RESULT: LED stays ON == NO mqtt connection
         }
     }
     else{
@@ -372,12 +423,19 @@ static bool mqtt_send(const char *topic, const char *value, bool retained)
 void setup() {
   
   Serial.begin(9600);
-  Serial.println("\n******\nGEIGER\n******");
+  Serial.println("\n******\nGEIGERrr\n******");
 
   //set led pin as output
   pinMode(BUILTIN_LED, OUTPUT);
   //start with led ON (low)
   digitalWrite(BUILTIN_LED, LOW);
+
+  // setup ssd1306 screen
+  display.begin(SSD1306_SWITCHCAPVCC);
+  display.setTextColor(1);  // Pixel color, one of: BLACK (0), WHITE(1) or INVERT(2)
+
+  to_display(1, "GEIGERrr..");
+  
 
   SPIFFS.begin();
   
@@ -389,9 +447,13 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(RESET_SETTINGS_PIN), reset_settings, RISING);
   
   read_fs_config();
-  
+
   setup_wifi();
 
+  l2 = "";
+  l4 = "";
+  l5 = "";
+  to_display(3, "Writing config...");
   // TODO: for now ALWAYS save the config
   // because I cannot determine when we have a new config or not...
   //if (save_config){
@@ -407,8 +469,10 @@ void setup() {
   // start counting
   memset(secondcounts, 0, sizeof(secondcounts));
   Serial.println("Start counting ...");
+  to_display(5, "Starting to count ...");
   pinMode(PIN_TICK, INPUT);
   attachInterrupt(digitalPinToInterrupt(PIN_TICK), tube_impulse, FALLING);
+  delay(3000);
 }
 
 static void GPSloop();
@@ -442,6 +506,51 @@ static void GPSloop()
 
 } // GPSloop
 
+void to_display(int line, String txt){
+  switch (line){
+    case 1:
+      l1 = txt;break;
+    case 2:
+      l2 = txt;break;
+    case 3:
+      l3 = txt;break;
+    case 4:
+      l4 = txt;break;
+    case 5:
+      l5 = txt;      
+      /*
+      int i = txt.toInt();
+      if(i % 2){ 
+        l5 = txt + " " + DOTS.substring(0, (((i+1)/2))-1) + ".";// oneven/odd
+      }
+      else{
+        l5 = txt + " " + DOTS.substring(0, i/2); // even 
+      }
+      */
+      break;      
+  }
+  // To display 
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.setTextSize(2); // 10 chars
+  display.println(l1);
+  display.setCursor(0,20);
+  display.setTextSize(1); // 21 chars
+  display.println(l2);
+  //display.println();
+  display.setCursor(0,32);
+  display.println(l3);
+  //display.println();
+  display.setCursor(0,44);
+  display.println(l4);
+  display.setCursor(0,54);
+  display.println(l5);
+  // SHOW IT
+  display.display();
+}
+
+int cpm = 0;
+
 // MAIN LOOP
 void loop() {
     // update the circular buffer every second
@@ -449,9 +558,26 @@ void loop() {
     unsigned long int secidx = second % 60;
     if (secidx != secidx_prev) {
         //Serial.println(secidx);
-        // new second, store the counts from the last second
-        unsigned long int count = counts;
+        // new second, store the total_count from the last second
+        unsigned long int count = total_count;
         secondcounts[secidx_prev] = count - count_prev;
+        
+        cpm = (count-count_prev)+cpm;
+        if (lat>0){
+          l2 = String(lat, 5) + " " + String(lon, 5) + " s" + String(fix.satellites);
+        }
+        else{
+          l2 = "- no gps (yet) -";
+        }
+        //l3 = UTC.dateTime("d/m H:i:s T").c_str();
+        l3 = nl_timezone.dateTime("d/m H:i:s T").c_str();
+        if(secidx%10 == 0){
+          l4 = String( WiFi.status()==WL_CONNECTED ? "wifi OK - " : "NO WIFI - ") + String( mqttClient.connected() ? "mqtt OK" : "no MQTT yet");
+          Serial.println(l4);
+        }
+        to_display(5, String(secidx)+"s - count: "+String(cpm));
+        
+        
         count_prev = count;
         secidx_prev = secidx;
     }
@@ -465,7 +591,7 @@ void loop() {
         Serial.println(second - second_prev);*/
         Serial.println("");
         // calculate sum
-        int cpm = 0;
+        cpm = 0;
         for (int i = 0; i < 60; i++) {
             cpm += secondcounts[i];
         }
@@ -503,7 +629,7 @@ void loop() {
           Serial.println(cpm);
           Serial.println("But skip for sending, because this is the first (cold/maybe zero) one...");
         }
-
+        cpm = 0; // RD
         second_prev = second;  // TODO? move this up (to be sure it is rest before the maybe time costing ip stuff?)
     }
     
